@@ -342,38 +342,40 @@ static const NSInteger kErrorMethodNotAvailableOnIOSVersion = 1005;
 }
 
 - (void)stopScanning {
-    if (!self.session) {
-        return;
-    }
-    
-    // Turn the torch off
+    // 1. Instantly turn off torch and UI gestures safely on Main Thread
     self.torchMode = MTBTorchModeOff;
-    
-    // Remove the preview layer
-    [self.capturePreviewLayer removeFromSuperlayer];
-    
-    // Stop recognizing taps for the 'Tap to Focus' feature
     [self stopRecognizingTaps];
-    
     self.resultBlock = nil;
-    self.capturePreviewLayer.session = nil;
-    self.capturePreviewLayer = nil;
-    
+
+    // 2. Capture local strong references so they don't disappear prematurely
     AVCaptureSession *session = self.session;
     AVCaptureDeviceInput *deviceInput = self.currentCaptureDeviceInput;
+    AVCaptureVideoPreviewLayer *previewLayer = self.capturePreviewLayer;
+
+    // Nullify state properties immediately on main thread so new sessions can be built if needed
     self.session = nil;
-    
+    self.capturePreviewLayer = nil;
+
+    // 3. Move ALL heavy teardown—including preview layer isolation—to the private queue
     dispatch_async(self.privateSessionQueue, ^{
-        // When we're finished scanning, reset the settings for the camera
-        // to their original states
-        // Must be dispatched as it is blocking
-        [self removeDeviceInput:deviceInput session:session];
-        for (AVCaptureOutput *output in session.outputs) {
+        
+        // Remove inputs and outputs first while still attached
+        if (deviceInput) {
+            [self removeDeviceInput:deviceInput session:session];
+        }
+        
+        for (AVCaptureOutput *output in [session.outputs copy]) {
             [session removeOutput:output];
         }
         
-        // Must be dispatched as it is blocking
+        // Stop the actual hardware data flow (blocking call)
         [session stopRunning];
+        
+        // 4. Clean up UI elements safely back on the Main Thread
+        dispatch_async(dispatch_get_main_queue(), ^{
+            previewLayer.session = nil;
+            [previewLayer removeFromSuperlayer];
+        });
     });
 }
 
